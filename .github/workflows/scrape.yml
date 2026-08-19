@@ -59,41 +59,54 @@ jobs:
 
       - name: Patch wikihow2zim & pywikiapi
         run: |
-          python -c "
-          import glob, re
+          cat << 'EOF' > patch_dependencies.py
+          import glob
+          import os
 
           # 1. Favicon Patch in wikihow2zim
-          files = glob.glob('/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages/wikihow2zim/scraper.py') + glob.glob('wikihow2zim/scraper.py')
-          for path in files:
-              with open(path, 'r') as f:
-                  code = f.read()
-              target = 'soup.find(\"link\", rel=\"shortcut icon\").attrs.get(\"href\")'
-              replacement = '(soup.find(\"link\", rel=lambda r: r and \"icon\" in (r if isinstance(r, str) else \" \".join(r))) or soup.find(\"link\")).attrs.get(\"href\", \"/favicon.ico\")'
-              if target in code:
-                  code = code.replace(target, replacement)
-                  with open(path, 'w') as f:
-                      f.write(code)
-                  print(f'Successfully patched wikihow2zim at {path}')
+          targets_scraper = glob.glob('/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages/wikihow2zim/scraper.py') + glob.glob('wikihow2zim/scraper.py')
+          for path in targets_scraper:
+              if os.path.exists(path):
+                  with open(path, 'r', encoding='utf-8') as f:
+                      code = f.read()
+                  target = 'soup.find("link", rel="shortcut icon").attrs.get("href")'
+                  replacement = '(soup.find("link", rel=lambda r: r and "icon" in (r if isinstance(r, str) else " ".join(r))) or soup.find("link")).attrs.get("href", "/favicon.ico")'
+                  if target in code:
+                      code = code.replace(target, replacement)
+                      with open(path, 'w', encoding='utf-8') as f:
+                          f.write(code)
+                      print(f'Successfully patched wikihow2zim at {path}')
 
-          # 2. Retry Patch in pywikiapi for HTTP 500 errors
-          pywiki_files = glob.glob('/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages/pywikiapi/Site.py')
-          for path in pywiki_files:
-              with open(path, 'r') as f:
-                  code = f.read()
-              if 'time.sleep' not in code:
-                  code = 'import time\n' + code
-              old_req = 'response = self.session.request(method, url, **request_kw)'
-              new_req = '''for attempt in range(5):
-              response = self.session.request(method, url, **request_kw)
-              if response.status_code < 500 and response.status_code != 429:
-                  break
-              time.sleep(2 * (attempt + 1))'''
-              if old_req in code:
-                  code = code.replace(old_req, new_req)
-                  with open(path, 'w') as f:
-                      f.write(code)
-                  print(f'Successfully patched pywikiapi retry logic at {path}')
-          "
+          # 2. Universal API Retry Patch in pywikiapi
+          targets_pywiki = glob.glob('/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages/pywikiapi/Site.py')
+          for path in targets_pywiki:
+              if os.path.exists(path):
+                  with open(path, 'r', encoding='utf-8') as f:
+                      code = f.read()
+                  
+                  if 'def request(self,' in code and '_retry_patched' not in code:
+                      old_def = 'def request(self, method, **request_kw):'
+                      new_def = (
+                          'def _original_request(self, method, **request_kw):\n'
+                          '        pass\n\n'
+                          '    _retry_patched = True\n'
+                          '    def request(self, method, **request_kw):\n'
+                          '        import time\n'
+                          '        for attempt in range(6):\n'
+                          '            try:\n'
+                          '                return self._original_request(method, **request_kw)\n'
+                          '            except Exception as e:\n'
+                          '                if attempt == 5:\n'
+                          '                    raise e\n'
+                          '                print(f"[RETRY] API call failed (attempt {attempt + 1}/6). Retrying in {(attempt + 1) * 3}s... Error: {e}")\n'
+                          '                time.sleep(3 * (attempt + 1))\n'
+                      )
+                      code = code.replace(old_def, new_def)
+                      with open(path, 'w', encoding='utf-8') as f:
+                          f.write(code)
+                      print(f'Successfully wrapped pywikiapi.request at {path}')
+          EOF
+          python patch_dependencies.py
 
       - name: Create Output Directory
         run: mkdir -p output
@@ -106,7 +119,7 @@ jobs:
             --without-videos \
             --skip-dom-check \
             --skip-footer-links \
-            --api-delay 1 \
+            --api-delay 1.5 \
             --debug \
             --output output/
 
