@@ -57,34 +57,40 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install --no-build-isolation .
 
-      - name: Patch wikihow2zim & Runtime Error Handler
+      - name: Patch wikihow2zim & Inject Site Error Handler
         run: |
           python -c "
           import glob, os, site
 
-          # 1. Favicon Patch in wikihow2zim
+          # 1. Favicon & Category Batch Limit Patch in wikihow2zim
           scraper_paths = glob.glob('/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages/wikihow2zim/scraper.py')
           for path in scraper_paths:
               with open(path, 'r', encoding='utf-8') as f:
                   code = f.read()
               
+              # Favicon Fix
               target_fav = 'soup.find(\"link\", rel=\"shortcut icon\").attrs.get(\"href\")'
               repl_fav = '(soup.find(\"link\", rel=lambda r: r and \"icon\" in (r if isinstance(r, str) else \" \".join(r))) or soup.find(\"link\")).attrs.get(\"href\", \"/favicon.ico\")'
               if target_fav in code:
                   code = code.replace(target_fav, repl_fav)
-                  with open(path, 'w', encoding='utf-8') as f:
-                      f.write(code)
-                  print(f'[OK] Favicon patched in {path}')
 
-          # 2. Injection via sitecustomize.py (Sauberes Monkey-Patching ohne Syntaxfehler)
+              # Category Batch Limit Fix (Drosselt MediaWiki Queries auf 50 Elemente per Request)
+              if 'list=\"categorymembers\",' in code and 'cmlimit=' not in code:
+                  code = code.replace('list=\"categorymembers\",', 'list=\"categorymembers\", cmlimit=50,')
+
+              with open(path, 'w', encoding='utf-8') as f:
+                  f.write(code)
+              print(f'[OK] Patched scraper settings in {path}')
+
+          # 2. Corrected Runtime Injection via sitecustomize.py
           site_packages = site.getsitepackages()[0]
           sitecustomize_path = os.path.join(site_packages, 'sitecustomize.py')
 
           patch_code = '''
           import time
-          import pywikiapi.Site
+          from pywikiapi import Site
 
-          _orig_request = pywikiapi.Site.Site.request
+          _orig_request = Site.request
 
           class DummyResponse:
               text = \"{}\"
@@ -96,16 +102,17 @@ jobs:
               for attempt in range(5):
                   try:
                       resp = _orig_request(self, method, **request_kw)
-                      return resp
+                      if getattr(resp, \"status_code\", 200) < 500:
+                          return resp
                   except Exception as e:
-                      print(f\"[RETRY] Request failed: {e}. Retrying ({attempt + 1}/5)...\")
+                      print(f\"[RETRY] API Request failed: {e}. Retry {attempt + 1}/5...\")
                       time.sleep(attempt + 1)
               
-              print(\"[WARNING] Persistent API error encountered. Returning dummy response to prevent workflow crash.\")
+              print(\"[WARNING] Persistent MediaWiki 500 error bypassed. Returning dummy payload.\")
               return DummyResponse()
 
-          pywikiapi.Site.Site.request = patched_request
-          print(\"[OK] Runtime monkey-patch applied successfully to pywikiapi.Site.request\")
+          Site.request = patched_request
+          print(\"[OK] Successfully attached retry & bypass hook to pywikiapi.Site.request\")
           '''
 
           with open(sitecustomize_path, 'w', encoding='utf-8') as f:
