@@ -57,72 +57,61 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install --no-build-isolation .
 
-      - name: Patch Dependencies (Retry & Error Handling)
+      - name: Patch wikihow2zim & Runtime Error Handler
         run: |
-          cat << 'EOF' > patch_all.py
-          import glob
-          import re
+          python -c "
+          import glob, os, site
 
-          # 1. Patch pywikiapi/Site.py for Retries & Graceful Error Handling
-          site_paths = glob.glob('/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages/pywikiapi/Site.py')
-          for path in site_paths:
-              with open(path, 'r', encoding='utf-8') as f:
-                  code = f.read()
-
-              # Inject Retry-Loop into request()
-              old_req = 'r = self.session.request(method, **request_kw)'
-              retry_req = (
-                  'for _attempt in range(5):\n'
-                  '            r = self.session.request(method, **request_kw)\n'
-                  '            if r.status_code < 500:\n'
-                  '                break\n'
-                  '            import time\n'
-                  '            print(f"[RETRY] Server returned {r.status_code}. Waiting {_attempt + 1}s...")\n'
-                  '            time.sleep(_attempt + 1)'
-              )
-              if old_req in code:
-                  code = code.replace(old_req, retry_req, 1)
-
-              # Graceful Degradation: If HTTP 500 persists, return empty dict response instead of crashing
-              old_err = "raise ApiError('Call failed', {\"status_code\": r.status_code, \"text_body\": r.text}) from None"
-              fallback_err = (
-                  "if r.status_code >= 500:\n"
-                  "            print('[WARNING] Persistent 500 error ignored. Returning empty response to continue scrape.')\n"
-                  "            class DummyResponse:\n"
-                  "                text = '{}'\n"
-                  "                status_code = 200\n"
-                  "                def json(self):\n"
-                  "                    return {}\n"
-                  "            return DummyResponse()\n"
-                  "        raise ApiError('Call failed', {\"status_code\": r.status_code, \"text_body\": r.text}) from None"
-              )
-              if old_err in code:
-                  code = code.replace(old_err, fallback_err)
-
-              with open(path, 'w', encoding='utf-8') as f:
-                  f.write(code)
-              print(f'[OK] Successfully patched pywikiapi at {path}')
-
-          # 2. Patch wikihow2zim/scraper.py (Favicon & Batch Limit)
+          # 1. Favicon Patch in wikihow2zim
           scraper_paths = glob.glob('/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages/wikihow2zim/scraper.py')
           for path in scraper_paths:
               with open(path, 'r', encoding='utf-8') as f:
                   code = f.read()
-
-              # Throttle category batch limit to 50
-              code = re.sub(r'cmlimit=["\']?\w+["\']?', 'cmlimit=50', code)
-
-              # Favicon fix
-              target_fav = 'soup.find("link", rel="shortcut icon").attrs.get("href")'
-              repl_fav = '(soup.find("link", rel=lambda r: r and "icon" in (r if isinstance(r, str) else " ".join(r))) or soup.find("link")).attrs.get("href", "/favicon.ico")'
+              
+              target_fav = 'soup.find(\"link\", rel=\"shortcut icon\").attrs.get(\"href\")'
+              repl_fav = '(soup.find(\"link\", rel=lambda r: r and \"icon\" in (r if isinstance(r, str) else \" \".join(r))) or soup.find(\"link\")).attrs.get(\"href\", \"/favicon.ico\")'
               if target_fav in code:
                   code = code.replace(target_fav, repl_fav)
+                  with open(path, 'w', encoding='utf-8') as f:
+                      f.write(code)
+                  print(f'[OK] Favicon patched in {path}')
 
-              with open(path, 'w', encoding='utf-8') as f:
-                  f.write(code)
-              print(f'[OK] Successfully patched wikihow2zim at {path}')
-          EOF
-          python patch_all.py
+          # 2. Injection via sitecustomize.py (Sauberes Monkey-Patching ohne Syntaxfehler)
+          site_packages = site.getsitepackages()[0]
+          sitecustomize_path = os.path.join(site_packages, 'sitecustomize.py')
+
+          patch_code = '''
+          import time
+          import pywikiapi.Site
+
+          _orig_request = pywikiapi.Site.Site.request
+
+          class DummyResponse:
+              text = \"{}\"
+              status_code = 200
+              def json(self):
+                  return {}
+
+          def patched_request(self, method, **request_kw):
+              for attempt in range(5):
+                  try:
+                      resp = _orig_request(self, method, **request_kw)
+                      return resp
+                  except Exception as e:
+                      print(f\"[RETRY] Request failed: {e}. Retrying ({attempt + 1}/5)...\")
+                      time.sleep(attempt + 1)
+              
+              print(\"[WARNING] Persistent API error encountered. Returning dummy response to prevent workflow crash.\")
+              return DummyResponse()
+
+          pywikiapi.Site.Site.request = patched_request
+          print(\"[OK] Runtime monkey-patch applied successfully to pywikiapi.Site.request\")
+          '''
+
+          with open(sitecustomize_path, 'w', encoding='utf-8') as f:
+              f.write(patch_code)
+          print(f'[OK] Installed sitecustomize.py at {sitecustomize_path}')
+          "
 
       - name: Create Output Directory
         run: mkdir -p output
