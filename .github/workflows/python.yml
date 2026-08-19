@@ -1,9 +1,9 @@
 name: Build wikiHow DE ZIM
 
 on:
-  workflow_dispatch: # Manuelles Starten über die GitHub-Oberfläche
+  workflow_dispatch:
   schedule:
-    - cron: '0 2 1 * *' # Automatischer Lauf am 1. jeden Monats um 02:00 Uhr
+    - cron: '0 2 1 * *'
 
 jobs:
   build-zim:
@@ -21,7 +21,6 @@ jobs:
       - name: Install dependencies & wikihow2zim
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          # --no-build-isolation verhindert das "No module named pip" Problem in der setup.py
           pip install --no-build-isolation .
 
       - name: Apply Request Patch (Fix HTTP 500 & User-Agent)
@@ -29,12 +28,14 @@ jobs:
           python -c "
           import site, os
 
+          site_packages = site.getsitepackages()[0]
+          patch_path = os.path.join(site_packages, 'sitecustomize.py')
+
           patch_code = '''
           import requests
           from requests.adapters import HTTPAdapter
           from urllib3.util.retry import Retry
 
-          # Patch Global Session for requests
           old_session = requests.Session
           def patched_session(*args, **kwargs):
               sess = old_session(*args, **kwargs)
@@ -45,20 +46,23 @@ jobs:
 
           requests.Session = patched_session
           '''
-          print('Patch setup script successfully prepared.')
+
+          with open(patch_path, 'w') as f:
+              f.write(patch_code)
+
+          print('sitecustomize.py successfully created.')
           "
 
       - name: Run Scraper & Build ZIM
         run: |
           mkdir -p output
           
-          # Starte den Scraper mit reduzierter Concurrency
           wikihow2zim \
             --language de \
             --output ./output \
             --name wikihow_de_all \
-            --concurrency 2 \
-            --verbose
+            --api-delay 1 \
+            --debug
 
       - name: Validate ZIM file size
         run: |
@@ -71,7 +75,6 @@ jobs:
           SIZE_MB=$(du -m "$ZIM_FILE" | cut -f1)
           echo "Erstellte ZIM-Datei: $ZIM_FILE ($SIZE_MB MB)"
           
-          # Bricht ab, wenn das ZIM-Archiv unter 100 MB groß ist (verhindert leere Dumps)
           if [ "$SIZE_MB" -lt 100 ]; then
             echo "Fehler: ZIM-Datei ist nur $SIZE_MB MB groß (vermutlich wieder API-Timeout/0 Artikel)."
             exit 1
