@@ -63,7 +63,13 @@ jobs:
       - name: Run wikihow2zim Scraper
         run: |
           LANG_CODE="${{ github.event.inputs.language || 'de' }}"
-          wikihow2zim --language "$LANG_CODE" --skip-dom-check --output output/
+          wikihow2zim \
+            --language "$LANG_CODE" \
+            --without-videos \
+            --skip-dom-check \
+            --skip-footer-links \
+            --debug \
+            --output output/
 
       - name: Upload ZIM Artifact
         uses: actions/upload-artifact@v4
