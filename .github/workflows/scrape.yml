@@ -57,58 +57,56 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install --no-build-isolation .
 
-      - name: Patch wikihow2zim & pywikiapi
+      - name: Setup Runtime Monkey-Patch (sitecustomize) & Favicon Patch
         run: |
-          cat << 'EOF' > patch_dependencies.py
-          import glob
-          import os
+          python -c "
+          import site, os, glob
 
-          # 1. Favicon Patch in wikihow2zim
+          # 1. Favicon Expression Patch in wikihow2zim
           targets_scraper = glob.glob('/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages/wikihow2zim/scraper.py') + glob.glob('wikihow2zim/scraper.py')
           for path in targets_scraper:
               if os.path.exists(path):
                   with open(path, 'r', encoding='utf-8') as f:
                       code = f.read()
-                  target = 'soup.find("link", rel="shortcut icon").attrs.get("href")'
-                  replacement = '(soup.find("link", rel=lambda r: r and "icon" in (r if isinstance(r, str) else " ".join(r))) or soup.find("link")).attrs.get("href", "/favicon.ico")'
+                  target = 'soup.find(\"link\", rel=\"shortcut icon\").attrs.get(\"href\")'
+                  replacement = '(soup.find(\"link\", rel=lambda r: r and \"icon\" in (r if isinstance(r, str) else \" \".join(r))) or soup.find(\"link\")).attrs.get(\"href\", \"/favicon.ico\")'
                   if target in code:
                       code = code.replace(target, replacement)
                       with open(path, 'w', encoding='utf-8') as f:
                           f.write(code)
-                      print(f'Successfully patched wikihow2zim at {path}')
+                      print(f'[OK] Patched Favicon handling in {path}')
 
-          # 2. Retry/Error Patch in pywikiapi/Site.py
-          targets_pywiki = glob.glob('/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages/pywikiapi/Site.py')
-          for path in targets_pywiki:
-              if os.path.exists(path):
-                  with open(path, 'r', encoding='utf-8') as f:
-                      code = f.read()
-                  
-                  target_err = 'raise ApiError(\'Call failed\', {"status_code": r.status_code, "text_body": r.text}) from None'
-                  
-                  retry_code = (
-                      'if r.status_code >= 500:\n'
-                      '            import time\n'
-                      '            for _retry in range(5):\n'
-                      '                wait_time = 2 ** _retry\n'
-                      '                print(f"[RETRY] Server returned {r.status_code}. Retrying in {wait_time}s...")\n'
-                      '                time.sleep(wait_time)\n'
-                      '                r = self.session.request(method, **request_kw)\n'
-                      '                if r.status_code < 500:\n'
-                      '                    break\n'
-                      '        if r.status_code != 200:\n'
-                      '            raise ApiError(\'Call failed\', {"status_code": r.status_code, "text_body": r.text}) from None'
-                  )
+          # 2. Setup sitecustomize.py for safe, runtime Retry Monkey-Patching
+          site_packages = site.getsitepackages()[0]
+          sitecustomize_path = os.path.join(site_packages, 'sitecustomize.py')
+          
+          patch_code = '''
+          import time
+          try:
+              import pywikiapi.Site
+              _orig_request = pywikiapi.Site.Site.request
 
-                  if target_err in code:
-                      code = code.replace(target_err, retry_code)
-                      with open(path, 'w', encoding='utf-8') as f:
-                          f.write(code)
-                      print(f'Successfully patched ApiError retry in pywikiapi at {path}')
-                  else:
-                      print(f'Warning: Target ApiError string not found in {path}')
-          EOF
-          python patch_dependencies.py
+              def patched_request(self, method, **request_kw):
+                  for attempt in range(6):
+                      try:
+                          return _orig_request(self, method, **request_kw)
+                      except Exception as e:
+                          if attempt == 5:
+                              raise e
+                          wait_time = (attempt + 1) * 3
+                          print(f\"[RETRY] API request failed ({e}). Retrying in {wait_time}s... (Attempt {attempt + 1}/6)\")
+                          time.sleep(wait_time)
+
+              pywikiapi.Site.Site.request = patched_request
+              print(\"[PATCH] Successfully injected pywikiapi retry logic via sitecustomize\")
+          except Exception as e:
+              print(f\"[PATCH WARNING] Could not apply sitecustomize patch: {e}\")
+          '''
+
+          with open(sitecustomize_path, 'w', encoding='utf-8') as f:
+              f.write(patch_code)
+          print(f'[OK] Created runtime patch at {sitecustomize_path}')
+          "
 
       - name: Create Output Directory
         run: mkdir -p output
