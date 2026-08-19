@@ -95,8 +95,9 @@ jobs:
           class DummyResponse:
               text = \"{}\"
               status_code = 200
-              def json(self):
-                  return {}
+              def json(self, *args, **kwargs):
+                  # Liefert valide MediaWiki JSON-Struktur zurück
+                  return {\"batchcomplete\": \"\", \"query\": {\"categorymembers\": [], \"pages\": {}}}
 
           def patched_request(self, method, **request_kw):
               for attempt in range(5):
