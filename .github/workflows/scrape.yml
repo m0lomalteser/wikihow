@@ -57,10 +57,12 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install --no-build-isolation .
 
-      - name: Patch wikihow2zim Favicon Bug
+      - name: Patch wikihow2zim & pywikiapi
         run: |
           python -c "
-          import glob
+          import glob, re
+
+          # 1. Favicon Patch in wikihow2zim
           files = glob.glob('/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages/wikihow2zim/scraper.py') + glob.glob('wikihow2zim/scraper.py')
           for path in files:
               with open(path, 'r') as f:
@@ -71,7 +73,26 @@ jobs:
                   code = code.replace(target, replacement)
                   with open(path, 'w') as f:
                       f.write(code)
-                  print(f'Successfully patched {path}')
+                  print(f'Successfully patched wikihow2zim at {path}')
+
+          # 2. Retry Patch in pywikiapi for HTTP 500 errors
+          pywiki_files = glob.glob('/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages/pywikiapi/Site.py')
+          for path in pywiki_files:
+              with open(path, 'r') as f:
+                  code = f.read()
+              if 'time.sleep' not in code:
+                  code = 'import time\n' + code
+              old_req = 'response = self.session.request(method, url, **request_kw)'
+              new_req = '''for attempt in range(5):
+              response = self.session.request(method, url, **request_kw)
+              if response.status_code < 500 and response.status_code != 429:
+                  break
+              time.sleep(2 * (attempt + 1))'''
+              if old_req in code:
+                  code = code.replace(old_req, new_req)
+                  with open(path, 'w') as f:
+                      f.write(code)
+                  print(f'Successfully patched pywikiapi retry logic at {path}')
           "
 
       - name: Create Output Directory
@@ -85,6 +106,7 @@ jobs:
             --without-videos \
             --skip-dom-check \
             --skip-footer-links \
+            --api-delay 1 \
             --debug \
             --output output/
 
