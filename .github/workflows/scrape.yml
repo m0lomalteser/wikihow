@@ -77,34 +77,36 @@ jobs:
                           f.write(code)
                       print(f'Successfully patched wikihow2zim at {path}')
 
-          # 2. Universal API Retry Patch in pywikiapi
+          # 2. Retry/Error Patch in pywikiapi/Site.py
           targets_pywiki = glob.glob('/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages/pywikiapi/Site.py')
           for path in targets_pywiki:
               if os.path.exists(path):
                   with open(path, 'r', encoding='utf-8') as f:
                       code = f.read()
                   
-                  if 'def request(self,' in code and '_retry_patched' not in code:
-                      old_def = 'def request(self, method, **request_kw):'
-                      new_def = (
-                          'def _original_request(self, method, **request_kw):\n'
-                          '        pass\n\n'
-                          '    _retry_patched = True\n'
-                          '    def request(self, method, **request_kw):\n'
-                          '        import time\n'
-                          '        for attempt in range(6):\n'
-                          '            try:\n'
-                          '                return self._original_request(method, **request_kw)\n'
-                          '            except Exception as e:\n'
-                          '                if attempt == 5:\n'
-                          '                    raise e\n'
-                          '                print(f"[RETRY] API call failed (attempt {attempt + 1}/6). Retrying in {(attempt + 1) * 3}s... Error: {e}")\n'
-                          '                time.sleep(3 * (attempt + 1))\n'
-                      )
-                      code = code.replace(old_def, new_def)
+                  target_err = 'raise ApiError(\'Call failed\', {"status_code": r.status_code, "text_body": r.text}) from None'
+                  
+                  retry_code = (
+                      'if r.status_code >= 500:\n'
+                      '            import time\n'
+                      '            for _retry in range(5):\n'
+                      '                wait_time = 2 ** _retry\n'
+                      '                print(f"[RETRY] Server returned {r.status_code}. Retrying in {wait_time}s...")\n'
+                      '                time.sleep(wait_time)\n'
+                      '                r = self.session.request(method, **request_kw)\n'
+                      '                if r.status_code < 500:\n'
+                      '                    break\n'
+                      '        if r.status_code != 200:\n'
+                      '            raise ApiError(\'Call failed\', {"status_code": r.status_code, "text_body": r.text}) from None'
+                  )
+
+                  if target_err in code:
+                      code = code.replace(target_err, retry_code)
                       with open(path, 'w', encoding='utf-8') as f:
                           f.write(code)
-                      print(f'Successfully wrapped pywikiapi.request at {path}')
+                      print(f'Successfully patched ApiError retry in pywikiapi at {path}')
+                  else:
+                      print(f'Warning: Target ApiError string not found in {path}')
           EOF
           python patch_dependencies.py
 
@@ -119,7 +121,7 @@ jobs:
             --without-videos \
             --skip-dom-check \
             --skip-footer-links \
-            --api-delay 1.5 \
+            --api-delay 2.0 \
             --debug \
             --output output/
 
