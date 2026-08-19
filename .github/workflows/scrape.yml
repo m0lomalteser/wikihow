@@ -57,6 +57,23 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install --no-build-isolation .
 
+      - name: Patch wikihow2zim Favicon Bug
+        run: |
+          python -c "
+          import glob
+          files = glob.glob('/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages/wikihow2zim/scraper.py') + glob.glob('wikihow2zim/scraper.py')
+          for path in files:
+              with open(path, 'r') as f:
+                  code = f.read()
+              target = 'soup.find(\"link\", rel=\"shortcut icon\").attrs.get(\"href\")'
+              replacement = '(soup.find(\"link\", rel=lambda r: r and \"icon\" in (r if isinstance(r, str) else \" \".join(r))) or soup.find(\"link\")).attrs.get(\"href\", \"/favicon.ico\")'
+              if target in code:
+                  code = code.replace(target, replacement)
+                  with open(path, 'w') as f:
+                      f.write(code)
+                  print(f'Successfully patched {path}')
+          "
+
       - name: Create Output Directory
         run: mkdir -p output
 
