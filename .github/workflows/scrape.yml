@@ -57,82 +57,72 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install --no-build-isolation .
 
-      - name: Apply AST/Source Patches (Favicon & Category Query Batch Limit)
+      - name: Patch Dependencies (Retry & Error Handling)
         run: |
-          python -c "
-          import os, glob
+          cat << 'EOF' > patch_all.py
+          import glob
+          import re
 
-          # 1. Favicon Patch
-          targets_scraper = glob.glob('/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages/wikihow2zim/scraper.py') + glob.glob('wikihow2zim/scraper.py')
-          for path in targets_scraper:
-              if os.path.exists(path):
-                  with open(path, 'r', encoding='utf-8') as f:
-                      code = f.read()
-                  
-                  # Favicon fix
-                  target_fav = 'soup.find(\"link\", rel=\"shortcut icon\").attrs.get(\"href\")'
-                  repl_fav = '(soup.find(\"link\", rel=lambda r: r and \"icon\" in (r if isinstance(r, str) else \" \".join(r))) or soup.find(\"link\")).attrs.get(\"href\", \"/favicon.ico\")'
-                  if target_fav in code:
-                      code = code.replace(target_fav, repl_fav)
+          # 1. Patch pywikiapi/Site.py for Retries & Graceful Error Handling
+          site_paths = glob.glob('/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages/pywikiapi/Site.py')
+          for path in site_paths:
+              with open(path, 'r', encoding='utf-8') as f:
+                  code = f.read()
 
-                  # 2. Category Batch Limit Fix (Verhindert HTTP 500 Timeouts auf wikiHow-Servern)
-                  # Fügt cmlimit=50/cmlimit=100 hinzu oder überschreibt bestehende cmlimit Parameter in build_expected_categories
-                  if 'def build_expected_categories' in code:
-                      code = code.replace('list=\"categorymembers\",', 'list=\"categorymembers\", cmlimit=\"50\",')
-                      print(f'[OK] Patched build_expected_categories batch limit in {path}')
+              # Inject Retry-Loop into request()
+              old_req = 'r = self.session.request(method, **request_kw)'
+              retry_req = (
+                  'for _attempt in range(5):\n'
+                  '            r = self.session.request(method, **request_kw)\n'
+                  '            if r.status_code < 500:\n'
+                  '                break\n'
+                  '            import time\n'
+                  '            print(f"[RETRY] Server returned {r.status_code}. Waiting {_attempt + 1}s...")\n'
+                  '            time.sleep(_attempt + 1)'
+              )
+              if old_req in code:
+                  code = code.replace(old_req, retry_req, 1)
 
-                  with open(path, 'w', encoding='utf-8') as f:
-                      f.write(code)
-                  print(f'[OK] Updated {path}')
-          "
+              # Graceful Degradation: If HTTP 500 persists, return empty dict response instead of crashing
+              old_err = "raise ApiError('Call failed', {\"status_code\": r.status_code, \"text_body\": r.text}) from None"
+              fallback_err = (
+                  "if r.status_code >= 500:\n"
+                  "            print('[WARNING] Persistent 500 error ignored. Returning empty response to continue scrape.')\n"
+                  "            class DummyResponse:\n"
+                  "                text = '{}'\n"
+                  "                status_code = 200\n"
+                  "                def json(self):\n"
+                  "                    return {}\n"
+                  "            return DummyResponse()\n"
+                  "        raise ApiError('Call failed', {\"status_code\": r.status_code, \"text_body\": r.text}) from None"
+              )
+              if old_err in code:
+                  code = code.replace(old_err, fallback_err)
 
-      - name: Setup sitecustomize.py (Catch ApiError & Retry Engine)
-        run: |
-          python -c "
-          import site, os
+              with open(path, 'w', encoding='utf-8') as f:
+                  f.write(code)
+              print(f'[OK] Successfully patched pywikiapi at {path}')
 
-          site_packages = site.getsitepackages()[0]
-          sitecustomize_path = os.path.join(site_packages, 'sitecustomize.py')
+          # 2. Patch wikihow2zim/scraper.py (Favicon & Batch Limit)
+          scraper_paths = glob.glob('/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages/wikihow2zim/scraper.py')
+          for path in scraper_paths:
+              with open(path, 'r', encoding='utf-8') as f:
+                  code = f.read()
 
-          patch_code = '''
-          import requests
-          from requests.adapters import HTTPAdapter
-          from urllib3.util import Retry
-          import pywikiapi.Site
+              # Throttle category batch limit to 50
+              code = re.sub(r'cmlimit=["\']?\w+["\']?', 'cmlimit=50', code)
 
-          # Network Retry Setup
-          retry_strategy = Retry(
-              total=5,
-              backoff_factor=1.5,
-              status_forcelist=[500, 502, 503, 504],
-              raise_on_status=False
-          )
+              # Favicon fix
+              target_fav = 'soup.find("link", rel="shortcut icon").attrs.get("href")'
+              repl_fav = '(soup.find("link", rel=lambda r: r and "icon" in (r if isinstance(r, str) else " ".join(r))) or soup.find("link")).attrs.get("href", "/favicon.ico")'
+              if target_fav in code:
+                  code = code.replace(target_fav, repl_fav)
 
-          old_init = requests.Session.__init__
-          def new_init(self, *args, **kwargs):
-              old_init(self, *args, **kwargs)
-              adapter = HTTPAdapter(max_retries=retry_strategy)
-              self.mount(\"http://\", adapter)
-              self.mount(\"https://\", adapter)
-
-          requests.Session.__init__ = new_init
-
-          # PyWikiAPI Error Handling Patch
-          _orig_iterate = pywikiapi.Site.Site.iterate
-          def safe_iterate(self, action, **req):
-              try:
-                  yield from _orig_iterate(self, action, **req)
-              except pywikiapi.utils.ApiError as e:
-                  print(f\"[WARNING] Ignored ApiError during query iteration: {e}\")
-
-          pywikiapi.Site.Site.iterate = safe_iterate
-          print(\"[OK] Successfully patched PyWikiAPI iterate error boundary\")
-          '''
-
-          with open(sitecustomize_path, 'w', encoding='utf-8') as f:
-              f.write(patch_code)
-          print(f'[OK] Injected runtime safety net to {sitecustomize_path}')
-          "
+              with open(path, 'w', encoding='utf-8') as f:
+                  f.write(code)
+              print(f'[OK] Successfully patched wikihow2zim at {path}')
+          EOF
+          python patch_all.py
 
       - name: Create Output Directory
         run: mkdir -p output
