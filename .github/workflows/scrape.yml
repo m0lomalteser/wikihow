@@ -57,12 +57,12 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install --no-build-isolation .
 
-      - name: Setup Runtime Monkey-Patch (sitecustomize) & Favicon Patch
+      - name: Inject Global Network Retry & Favicon Patch
         run: |
           python -c "
           import site, os, glob
 
-          # 1. Favicon Expression Patch in wikihow2zim
+          # 1. Favicon Patch
           targets_scraper = glob.glob('/opt/hostedtoolcache/Python/*/x64/lib/python*/site-packages/wikihow2zim/scraper.py') + glob.glob('wikihow2zim/scraper.py')
           for path in targets_scraper:
               if os.path.exists(path):
@@ -74,38 +74,40 @@ jobs:
                       code = code.replace(target, replacement)
                       with open(path, 'w', encoding='utf-8') as f:
                           f.write(code)
-                      print(f'[OK] Patched Favicon handling in {path}')
+                      print(f'[OK] Patched Favicon in {path}')
 
-          # 2. Setup sitecustomize.py for safe, runtime Retry Monkey-Patching
+          # 2. Network-Level Retry Patch via sitecustomize (Zwingt requests.Session zu Retries bei HTTP 500)
           site_packages = site.getsitepackages()[0]
           sitecustomize_path = os.path.join(site_packages, 'sitecustomize.py')
-          
+
           patch_code = '''
-          import time
-          try:
-              import pywikiapi.Site
-              _orig_request = pywikiapi.Site.Site.request
+          import requests
+          from requests.adapters import HTTPAdapter
+          from urllib3.util import Retry
 
-              def patched_request(self, method, **request_kw):
-                  for attempt in range(6):
-                      try:
-                          return _orig_request(self, method, **request_kw)
-                      except Exception as e:
-                          if attempt == 5:
-                              raise e
-                          wait_time = (attempt + 1) * 3
-                          print(f\"[RETRY] API request failed ({e}). Retrying in {wait_time}s... (Attempt {attempt + 1}/6)\")
-                          time.sleep(wait_time)
+          # Configuriere aggressiven Retry-Mechanismus für Serverfehler (500, 502, 503, 504)
+          retry_strategy = Retry(
+              total=10,
+              backoff_factor=2,  # Wartet 2s, 4s, 8s, 16s, 32s...
+              status_forcelist=[500, 502, 503, 504],
+              raise_on_status=False
+          )
 
-              pywikiapi.Site.Site.request = patched_request
-              print(\"[PATCH] Successfully injected pywikiapi retry logic via sitecustomize\")
-          except Exception as e:
-              print(f\"[PATCH WARNING] Could not apply sitecustomize patch: {e}\")
+          old_init = requests.Session.__init__
+
+          def new_init(self, *args, **kwargs):
+              old_init(self, *args, **kwargs)
+              adapter = HTTPAdapter(max_retries=retry_strategy)
+              self.mount(\"http://\", adapter)
+              self.mount(\"https://\", adapter)
+
+          requests.Session.__init__ = new_init
+          print(\"[OK] Successfully hooked requests.Session with HTTP 500 Retry Strategy\")
           '''
 
           with open(sitecustomize_path, 'w', encoding='utf-8') as f:
               f.write(patch_code)
-          print(f'[OK] Created runtime patch at {sitecustomize_path}')
+          print(f'[OK] Injected urllib3/requests retry hook to {sitecustomize_path}')
           "
 
       - name: Create Output Directory
@@ -119,7 +121,7 @@ jobs:
             --without-videos \
             --skip-dom-check \
             --skip-footer-links \
-            --api-delay 2.0 \
+            --api-delay 3.0 \
             --debug \
             --output output/
 
