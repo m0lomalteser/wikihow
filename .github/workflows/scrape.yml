@@ -68,13 +68,13 @@ jobs:
               with open(path, 'r', encoding='utf-8') as f:
                   code = f.read()
               
-              # Favicon Fix
+              # Favicon Fallback Fix
               target_fav = 'soup.find(\"link\", rel=\"shortcut icon\").attrs.get(\"href\")'
               repl_fav = '(soup.find(\"link\", rel=lambda r: r and \"icon\" in (r if isinstance(r, str) else \" \".join(r))) or soup.find(\"link\")).attrs.get(\"href\", \"/favicon.ico\")'
               if target_fav in code:
                   code = code.replace(target_fav, repl_fav)
 
-              # Patch categorymembers params: Set small limit to prevent MediaWiki DB timeouts
+              # Patch categorymembers params to avoid database timeouts
               if 'list=\"categorymembers\",' in code:
                   code = code.replace('list=\"categorymembers\",', 'list=\"categorymembers\", cmlimit=\"20\", cmprop=\"ids|title\",')
 
@@ -82,48 +82,56 @@ jobs:
                   f.write(code)
               print(f'[OK] Patched scraper settings in {path}')
 
-          # 2. Advanced API Patching via sitecustomize.py
+          # 2. Global HTTP Request Interceptor via sitecustomize.py
           site_packages = site.getsitepackages()[0]
           sitecustomize_path = os.path.join(site_packages, 'sitecustomize.py')
 
           patch_code = '''
           import time
           import requests
-          from pywikiapi import Site
 
-          _orig_request = Site.request
+          _orig_session_request = requests.Session.request
 
-          class DummyResponse:
-              text = \"{}\"
-              status_code = 200
-              def json(self, *args, **kwargs):
-                  return {\"batchcomplete\": \"\", \"query\": {\"categorymembers\": [], \"pages\": {}}}
-
-          def patched_request(self, method, **request_kw):
-              # Force browser User-Agent header to stop wikiHow WAF blocking
-              headers = request_kw.get(\"headers\", {})
-              headers[\"User-Agent\"] = \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\"
-              request_kw[\"headers\"] = headers
-
-              # If cmlimit was passed as integer or large value, reduce it
-              if \"cmlimit\" in request_kw:
-                  request_kw[\"cmlimit\"] = 20
-
-              for attempt in range(5):
-                  try:
-                      resp = _orig_request(self, method, **request_kw)
-                      # Check if response status is OK and non-empty
-                      if getattr(resp, \"status_code\", 200) < 500:
-                          return resp
-                  except Exception as e:
-                      print(f\"[RETRY] MediaWiki API call failed: {e}. Retry {attempt + 1}/5...\")
-                      time.sleep(1.5 * (attempt + 1))
+          def custom_request(self, method, url, **kwargs):
+              headers = kwargs.get(\"headers\") or {}
               
-              print(\"[WARNING] MediaWiki 500 Error sustained after 5 retries. Returning safe empty response.\")
-              return DummyResponse()
+              # Inject browser headers to bypass WAF & bot filters
+              browser_headers = {
+                  \"User-Agent\": \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36\",
+                  \"Accept\": \"text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8\",
+                  \"Accept-Language\": \"en-US,en;q=0.9,de;q=0.8\",
+                  \"Cache-Control\": \"max-age=0\",
+                  \"Sec-Ch-Ua\": '\"Chromium\";v=\"122\", \"Not(A:Brand\";v=\"24\", \"Google Chrome\";v=\"122\"',
+                  \"Sec-Ch-Ua-Mobile\": \"?0\",
+                  \"Sec-Ch-Ua-Platform\": '\"Windows\"',
+                  \"Sec-Fetch-Dest\": \"document\",
+                  \"Sec-Fetch-Mode\": \"navigate\",
+                  \"Sec-Fetch-Site\": \"none\",
+                  \"Sec-Fetch-User\": \"?1\",
+                  \"Upgrade-Insecure-Requests\": \"1\"
+              }
+              
+              for k, v in browser_headers.items():
+                  if not any(existing.lower() == k.lower() for existing in headers):
+                      headers[k] = v
 
-          Site.request = patched_request
-          print(\"[OK] Attached custom User-Agent and Retry/Throttling Hook to pywikiapi.Site\")
+              kwargs[\"headers\"] = headers
+
+              # Retry exponential backoff for 50x / 429 WAF responses
+              for attempt in range(6):
+                  try:
+                      resp = _orig_session_request(self, method, url, **kwargs)
+                      if resp.status_code not in (500, 502, 503, 504, 429):
+                          return resp
+                      print(f\"[RETRY {attempt + 1}/6] HTTP {resp.status_code} for {url[:80]}. Waiting...\")
+                  except Exception as e:
+                      print(f\"[RETRY {attempt + 1}/6] Request error ({e}) for {url[:80]}. Waiting...\")
+                  time.sleep(3 * (attempt + 1))
+
+              return _orig_session_request(self, method, url, **kwargs)
+
+          requests.Session.request = custom_request
+          print(\"[OK] Global requests.Session monkey-patch active.\")
           '''
 
           with open(sitecustomize_path, 'w', encoding='utf-8') as f:
@@ -142,7 +150,8 @@ jobs:
             --without-videos \
             --skip-dom-check \
             --skip-footer-links \
-            --api-delay 3.0 \
+            --api-delay 4.0 \
+            --max-consecutive-retries 10 \
             --debug \
             --output output/
 
