@@ -150,13 +150,13 @@ jobs:
             --without-videos \
             --skip-dom-check \
             --skip-footer-links \
+            --delay 1.0 \
             --api-delay 4.0 \
-            --max-consecutive-retries 10 \
             --debug \
             --output output/
 
       - name: Upload ZIM Artifact
-        uses: actions/upload-artifact@v4
+        uses: axes/upload-artifact@v4
         with:
           name: wikihow-${{ github.event.inputs.language || 'de' }}-zim
           path: output/*.zim
